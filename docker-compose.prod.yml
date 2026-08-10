@@ -1,0 +1,69 @@
+# 生产部署（腾讯云 llm.beautymodel.com.cn）
+#
+# 服务器上已有一层总入口 nginx（容器 beauty-site-nginx，持有 80/443 与 TLS 证书），
+# 它按【容器名】把该域名的流量转发进来，并且已经配好 proxy_buffering off 与 600s 超时
+# ——正好满足本项目的 SSE 推送和长时 Agent 推理。
+#
+# 因此这里的要点是：
+#   1. web 容器接入 beauty-site_beauty-network（外部网络），让总入口能按名字找到它
+#   2. web 不映射宿主端口——只在 Docker 网络内被访问，减少暴露面
+#   3. api 也不映射宿主端口，只允许 web 容器代理访问
+#
+# 启动：docker compose -f docker-compose.prod.yml up -d --build
+
+services:
+  api:
+    build:
+      context: .
+      args:
+        # 腾讯云内网镜像，仅在本机可达；Dockerfile 里默认值是官方源，
+        # 换服务器/本地构建时不传这两个参数即可。
+        APT_MIRROR: mirrors.tencentyun.com
+        PIP_INDEX: https://mirrors.tencentyun.com/pypi/simple
+    image: llmdemo-api:latest
+    container_name: llmdemo-api
+    env_file:
+      - .env
+    environment:
+      APP_ENV: production
+      DATABASE_URL: sqlite+aiosqlite:////app/data/tasks.db
+      MEMORY_PERSIST_DIR: /app/data/chroma
+      CHECKPOINT_DIR: /app/data/checkpoints
+    volumes:
+      - ./data:/app/data
+      - ./output:/app/output
+    restart: unless-stopped
+    healthcheck:
+      # 容器内没装 curl，用 Python 探活（镜像里必然有 Python）
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 8s
+      retries: 5
+      start_period: 40s
+    networks:
+      - internal
+
+  # 服务名不能叫 web：接入的是跨项目共享网络，那上面已经有别的项目的 web，
+  # 同名会让两边的 DNS 互相污染。服务名一律带 llmdemo- 前缀。
+  llmdemo-web:
+    build:
+      context: ./frontend-vue
+      dockerfile: Dockerfile
+    image: llmdemo-web:latest
+    container_name: llmdemo-nginx      # 总入口 nginx 用这个名字反代
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - internal
+      - entry
+
+networks:
+  internal:
+    driver: bridge
+  entry:
+    # 复用总入口所在的网络（由 beauty-site 项目创建），不要重新创建
+    external: true
+    name: beauty-site_beauty-network
