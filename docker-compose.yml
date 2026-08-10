@@ -1,0 +1,44 @@
+services:
+  api:
+    build: .
+    image: mutil-agent-v1:latest
+    container_name: mutil-agent-api
+    env_file:
+      - .env
+    environment:
+      APP_ENV: production
+      DATABASE_URL: sqlite+aiosqlite:////app/data/tasks.db
+      MEMORY_PERSIST_DIR: /app/data/chroma
+      CHECKPOINT_DIR: /app/data/checkpoints
+    volumes:
+      - ./data:/app/data
+      - ./output:/app/output
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    healthcheck:
+      # 用 Python 探活而不是 curl：镜像里没有装 curl
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 8s
+      retries: 3
+    networks:
+      default:
+        # 前端 nginx 统一用 llmdemo-api 这个名字连后端（生产同名），
+        # 这里补上别名，dev 与 prod 才能共用同一份 nginx.conf
+        aliases:
+          - llmdemo-api
+
+  frontend:
+    build:
+      context: ./frontend-vue
+      dockerfile: Dockerfile
+    image: mutil-agent-v1-web:latest
+    container_name: mutil-agent-web
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "8080:80"
+    restart: unless-stopped
